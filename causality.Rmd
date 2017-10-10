@@ -1,0 +1,422 @@
+---
+title: "Causalidade: pacotes do R"
+output: 
+  html_notebook:
+    theme: lumen
+    code_folding: show  
+---
+
+## Tasks em causalidade
+
+- Predição -> todos os pacotes de regressão
+- Intervenção -> `lavaan`, `dagitty`, `HydeNet`, `causaleffect`
+- Contrafactual -> `lavaan`, `CausalImpact`
+
+Vamos falar de `dagitty`, `lavaan`, `HydeNet`, `CausalImpact`
+
+## Instalação
+
+```{r eval=FALSE}
+install.packages("dagitty")
+install.packages("lavaan")
+install.packages("HydeNet")
+install.packages("CausalImpact")
+install.packages("GPArotation")
+```
+
+E vamos usar o tidyverse porque sim :D
+
+```{r}
+library(tidyverse)
+```
+
+--------------------------------------------------------------------------------
+
+## dagitty e lavaan
+
+Esses dois pacotes podem ser utilizados em conjunto. O dagitty também é uma [interface web](http://dagitty.net/).
+
+- `dagitty`: foco no diagrama de influências e suas propriedades.
+- `lavaan`: foco nas equações estruturais.
+
+### dagitty
+
+Primeiramente, precisamos saber desenhar!
+
+```{r}
+g <- dagitty('dag {
+    X [pos="0,1"]
+    Y [pos="1,1"]
+    Z [pos="2,1"]
+    W [pos="1,0"]
+    T [pos="2,2"]
+    
+    X -> Y -> Z -> T
+    X -> W -> Y -> T
+    W -> Z
+}')
+plot(g)
+```
+
+OU
+
+```{r}
+g <- dagitty('dag {
+    X -> Y -> Z -> T
+    X -> W -> Y -> T
+    W -> Z
+}')
+coordinates(g) <- list(
+  x = list(X = 0, Y = 1, Z = 2, W = 1, T = 2),
+  y = list(X = 1, Y = 1, Z = 1, W = 0, T = 2)
+)
+plot(g)
+
+```
+
+#### Propriedades de `g`
+
+```{r}
+parents(g, "Z")
+```
+
+```{r}
+ancestors(g, "Z")
+```
+
+```{r}
+children(g, "W")
+```
+
+```{r}
+descendants(g, "W")
+```
+
+#### Caminhos
+
+```{r}
+paths(g, "X", "T")
+```
+
+```{r}
+paths(g, "X", "T", directed = TRUE)
+```
+
+```{r}
+paths(g, "X", "T", Z = "Z", directed = TRUE)
+```
+
+#### Exemplo de regressão
+
+```{r}
+N <- 10000
+set.seed(123)
+# latentes
+Ux <- rnorm(N) 
+Uy <- rnorm(N)
+Uz <- rnorm(N)
+# regressão
+X <- Ux
+Y <- 1/3 * X + Uy
+Z <- 1/16 * Y + Uz 
+d <- data_frame(X = X, Y = Y, Z = Z)
+d
+```
+
+```{r, fig.height=3}
+g <- dagitty("dag {
+    Ux -> X -> Y -> Z <- Uz
+    Uy -> Y
+}")
+coordinates(g) <- list(
+  x = c(Ux = 1, Uy = 2, Uz = 3, X = 1, Y = 2, Z = 3),
+  y = c(Ux = 1, Uy = 1, Uz = 1, X = 0, Y = 0, Z = 0) 
+)
+plot(g)
+```
+
+**Q**: Qual é o valor esperado de $Z$ dado $Y=3$? 
+
+```{r}
+16 * predict(lm(Z ~ Y, d), list(Y=3), interval = "confidence")
+```
+
+**Q**: Qual é o valor esperado de $Z$ dado $Y=3$ e $X=1$? 
+
+```{r}
+16 * predict(lm(Z ~ Y + X, d), list(Y = 3, X = 1), interval = "confidence")
+```
+
+### d-separação!
+
+
+```{r}
+dag <- dagitty("dag {
+    X -> R -> S -> T <- U <- V -> Y
+    T -> P
+}")
+plot(graphLayout(dag))
+```
+
+```{r}
+impliedConditionalIndependencies(dag)
+```
+
+```{r}
+dag %>% 
+  dseparated("Y", "X", "V")
+```
+
+```{r}
+predictors <- c("X", "R", "S", "T", "P")
+# predictors <- c("S", "T")
+dseparated(dag, "Y", list(), predictors) # quais são d-separados?
+```
+
+```{r}
+d <- simulateSEM(dag, .7, .7, N = 10000)
+
+lm(Y ~ X + R + S + T + P, data = d) %>% 
+  broom::tidy(conf.int = TRUE) %>% 
+  select(term, estimate, conf.low, conf.high) %>% 
+  ggplot(aes(x = fct_rev(term), y = estimate)) +
+  geom_point() +
+  geom_linerange(aes(ymin = conf.low, ymax = conf.high)) +
+  geom_hline(yintercept = 0, colour = "red") +
+  coord_flip() +
+  theme_minimal(16)
+```
+
+Outras coisas
+
+- `markovBlanket()`: cobertura de markov
+- `dconnected()`: d-conectado
+- `equivalentDAGs()`: classe de DAGs equivalentes
+- `adjustmentSets()`: critério back-door (estudar)
+
+### lavaan
+
+Com o `lavaan` é possível definir três tipos de relação entre variáveis:
+
+- `~`: regressão, ou seja, y = f(x), f(x) = a + b*x 
+    - direção `->`
+- `=~`: variáveis latentes: você define no modelo, mas que não são colunas das bases de dados 
+    - direção `->`
+- `~~`: variáveis correlacionadas 
+    - direção `<->`
+
+#### Exemplo 1: análise fatorial confirmatória
+
+```{r}
+as_tibble(HolzingerSwineford1939)
+```
+
+Especificação do modelo: com uma string!
+
+```{r}
+model <- ' 
+  visual  =~ x1 + x2 + x3      
+  textual =~ x4 + x5 + x6
+  speed   =~ x7 + x8 + x9
+'
+```
+
+Plotando grafo correspondente
+
+```{r}
+model %>% 
+  lavaan::lavaanify() %>% 
+  dagitty::lavaanToGraph() %>% 
+  dagitty::graphLayout() %>% 
+  plot()
+```
+
+Ajuste do modelo:
+
+```{r}
+fit <- cfa(model, data = HolzingerSwineford1939)
+summary(fit, fit.measures = TRUE)
+```
+
+
+Comparando com análise fatorial:
+
+```{r}
+library(GPArotation)
+HolzingerSwineford1939 %>% 
+  select(x1:x9) %>% 
+  factanal(3, rotation = "oblimin")
+```
+
+#### Exemplo 2
+
+Especificação do modelo
+
+```{r}
+model <- '
+  # measurement model
+    ind60 =~ x1 + x2 + x3
+    dem60 =~ y1 + y2 + y3 + y4
+    dem65 =~ y5 + y6 + y7 + y8
+  # regressions
+    dem60 ~ ind60
+    dem65 ~ ind60 + dem60
+  # residual correlations
+    y1 ~~ y5
+    y2 ~~ y4 + y6
+    y3 ~~ y7
+    y4 ~~ y8
+    y6 ~~ y8
+'
+```
+
+
+#### Exemplo 2: política
+
+```{r}
+as_tibble()
+```
+
+
+Plotando DAG correspondente
+
+```{r}
+model %>% 
+  lavaan::lavaanify() %>% 
+  dagitty::lavaanToGraph() %>% 
+  dagitty::graphLayout() %>% 
+  plot()
+```
+
+
+Ajustando modelo de equações estruturais
+
+```{r}
+fit <- sem(model, data = PoliticalDemocracy)
+summary(fit, standardized = TRUE)
+```
+
+--------------------------------------------------------------------------------
+
+## CausalImpact
+
+- Para análise contrafactual
+- Feito pelo time da Google
+
+```{r}
+library(CausalImpact)
+```
+
+```{r}
+set.seed(1)
+
+# definição de antes e depois
+pre_period <- c(1, 70)
+post_period <- c(71, 100)
+
+# gerando x e y
+x1 <- 100 + arima.sim(model = list(ar = 0.999), n = 100)
+y <- 1.2 * x1 + rnorm(100)
+y[71:100] <- y[71:100] + 10 # alterando y (apenas y!!!)
+
+dados <- data_frame(y, x1)
+dados
+```
+
+```{r}
+impact <- CausalImpact(dados, pre_period, post_period)
+plot(impact)
+```
+
+## HydeNet
+
+- Pacote para diagramas de influências usando o R (decision networks)
+- Assume que a rede já existe (não descobre a rede)
+- Inferência (cálculo de probabilidades condicionais) feita com o JAGS.
+    - Obs: Inferência é um problema NP-difícil. Existem algoritmos exatos (ver `gRain`) e aproximados (heurísticas e métodos baseados em simulação).
+
+
+```{r}
+library(HydeNet)
+
+mtcars2 <- mtcars %>% 
+  mutate_at(vars(cyl, gear, am), funs(as.factor))
+  
+carNet <- HydeNetwork(~ cyl
+                      + disp | cyl
+                      + hp | disp
+                      + wt
+                      + gear
+                      + mpg | disp * hp * wt * gear,
+                      data = mtcars2)
+
+plot(carNet)
+```
+
+Escrevendo modelo no estilo JAGS
+
+```{r}
+HydeNet:::writeJagsModel(carNet, node = "cyl") %>% 
+  cat()
+```
+
+```{r}
+writeNetworkModel(carNet, pretty = TRUE)
+```
+
+Simulando a rede Bayesiana usando JAGS, com rede condicional a `cyl=8`
+
+```{r}
+carNet2 <- compileJagsModel(carNet, data = list(cyl = "8"))
+```
+
+Posteriori para algumas variáveis
+
+```{r fig.height=7, fig.width=7}
+post1 <- HydePosterior(carNet2,
+                       variable.names = c("cyl","hp","mpg"),
+                       n.iter = 10000,
+                       bind = FALSE)
+
+plot(post1$codas[,c("hp", "mpg", "cyl")])
+```
+
+```{r}
+mtcars2 <- mtcars %>% 
+  mutate_at(vars(cyl, gear, am), funs(as.factor)) %>% 
+  mutate(happiness = sqrt(mpg))
+
+carNet <- HydeNetwork(~ cyl
+                      + disp | cyl
+                      + am | disp
+                      + wt
+                      + gear
+                      + mpg | disp * am * wt * gear
+                      + happiness | mpg,
+                      data = mtcars2)
+
+dnet <- carNet %>% 
+  setDecisionNodes(am) %>% 
+  setUtilityNodes(happiness)
+
+plot(dnet)
+```
+
+```{r}
+am1 <- compileJagsModel(dnet, data = list(disp = 200, am = "1"))
+am0 <- compileJagsModel(dnet, data = list(disp = 200, am = "0"))
+```
+
+```{r}
+posterioris <- list(am0, am1) %>% 
+  map_dfr(~{
+    HydePosterior(.x,
+                  variable.names = c("wt", "gear", "mpg", "happiness", "am"),
+                  n.iter = 10000)
+  })
+
+posterioris %>% 
+  group_by(am) %>% 
+  summarise(m = mean(happiness))
+```
+
