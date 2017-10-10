@@ -21,7 +21,6 @@ install.packages("dagitty")
 install.packages("lavaan")
 install.packages("HydeNet")
 install.packages("CausalImpact")
-install.packages("GPArotation")
 ```
 
 E vamos usar o tidyverse porque sim :D
